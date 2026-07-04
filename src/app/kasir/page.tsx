@@ -76,7 +76,7 @@ export default function KasirPage() {
   };
 
   return (
-    <div className="flex flex-col gap-4 w-full h-full relative">
+    <div className="flex flex-col flex-1 gap-4 w-full relative">
       {/* Toast Alert stack container */}
       <div className="fixed top-4 left-4 right-4 z-50 flex flex-col gap-2 pointer-events-none max-w-md mx-auto">
         {toasts.map((t) => (

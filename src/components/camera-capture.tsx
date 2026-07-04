@@ -577,7 +577,7 @@ export default function CameraCapture({
   if (!isOpen) return null;
 
   return (
-    <div className={embedded ? "relative w-full h-[380px] bg-zinc-950 text-zinc-100 flex flex-col border border-zinc-900 shadow-xl overflow-hidden rounded-2xl" : "fixed inset-0 z-50 flex flex-col bg-zinc-950 text-zinc-100 transform animate-in fade-in duration-300"}>
+    <div className={embedded ? "relative w-full flex-1 bg-zinc-950 text-zinc-100 flex flex-col border border-zinc-900 shadow-xl overflow-hidden rounded-2xl" : "fixed inset-0 z-50 flex flex-col bg-zinc-950 text-zinc-100 transform animate-in fade-in duration-300"}>
       <style>{`
         @keyframes sweep {
           0% { top: 0%; }
