@@ -136,38 +136,29 @@ export default function KasirPage() {
           </div>
         )}
 
-        {loadingProduk && produkList.length === 0 ? (
-          <div className="flex-1 flex flex-col items-center justify-center py-24 gap-3">
-            <Loader2 className="w-8 h-8 text-teal-400 animate-spin" />
-            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Memuat database produk...</span>
-          </div>
-        ) : isManualMode ? (
-          <ProductGrid
-            products={produkList}
-            categories={kategoriList}
-            onProductSelect={handleProductSelect}
-          />
+        {isManualMode ? (
+          loadingProduk && produkList.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center py-24 gap-3">
+              <Loader2 className="w-8 h-8 text-teal-400 animate-spin" />
+              <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Memuat database produk...</span>
+            </div>
+          ) : (
+            <ProductGrid
+              products={produkList}
+              categories={kategoriList}
+              onProductSelect={handleProductSelect}
+            />
+          )
         ) : (
           <div className="flex-1 flex flex-col justify-start">
-            {produkList.length > 0 ? (
-              <CameraCapture
-                isOpen={true}
-                onClose={() => {}}
-                produkList={produkList}
-                onDetected={handleDetectedProduct}
-                continuousMode={true}
-                embedded={true}
-              />
-            ) : (
-              <div className="flex-1 flex flex-col items-center justify-center py-24 gap-4 text-center">
-                <div className="p-4 bg-zinc-900/60 border border-zinc-800 rounded-3xl max-w-xs mx-auto">
-                  <p className="text-xs font-bold uppercase tracking-wider text-zinc-300 mb-1">Database Kosong</p>
-                  <p className="text-[11px] text-zinc-500 leading-relaxed">
-                    Belum ada produk terdaftar di database Anda. Silakan tambah produk baru terlebih dahulu di menu produk.
-                  </p>
-                </div>
-              </div>
-            )}
+            <CameraCapture
+              isOpen={true}
+              onClose={() => {}}
+              produkList={produkList}
+              onDetected={handleDetectedProduct}
+              continuousMode={true}
+              embedded={true}
+            />
           </div>
         )}
       </div>
