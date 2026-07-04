@@ -144,6 +144,30 @@ export async function generateAugmentedEmbeddings(
   });
   embeddings.push(await getEmbedding(brightDown));
 
+  // 7. Zoom-In (+15%)
+  const zoomIn = createVariant((ctx, c) => {
+    const scale = 1.15;
+    const nw = w * scale;
+    const nh = h * scale;
+    const ox = (w - nw) / 2;
+    const oy = (h - nh) / 2;
+    ctx.drawImage(sourceCanvas, ox, oy, nw, nh);
+  });
+  embeddings.push(await getEmbedding(zoomIn));
+
+  // 8. Zoom-Out (-15%)
+  const zoomOut = createVariant((ctx, c) => {
+    const scale = 0.85;
+    const nw = w * scale;
+    const nh = h * scale;
+    const ox = (w - nw) / 2;
+    const oy = (h - nh) / 2;
+    ctx.fillStyle = '#000000'; // Fill border with black
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(sourceCanvas, ox, oy, nw, nh);
+  });
+  embeddings.push(await getEmbedding(zoomOut));
+
   return embeddings;
 }
 

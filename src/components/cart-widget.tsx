@@ -13,6 +13,7 @@ interface CartWidgetProps {
   updateQuantity: (produkId: number, quantity: number) => void;
   removeFromCart: (produkId: number) => void;
   onCheckout: () => void;
+  onClearCart?: () => void;
 }
 
 /**
@@ -26,6 +27,7 @@ export default function CartWidget({
   updateQuantity,
   removeFromCart,
   onCheckout,
+  onClearCart,
 }: CartWidgetProps) {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -86,10 +88,24 @@ export default function CartWidget({
 
             {/* Header */}
             <div className="px-5 py-2 border-b border-zinc-900 flex items-center justify-between">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-450">Detail Belanja</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Detail Belanja</h3>
+                {onClearCart && (
+                  <button
+                    onClick={() => {
+                      onClearCart();
+                      setIsOpen(false);
+                    }}
+                    className="flex items-center gap-1 text-[10px] font-bold text-rose-400 hover:text-rose-350 bg-rose-500/10 border border-rose-500/20 px-2.5 py-0.5 rounded-md active:scale-95 transition-all"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    Kosongkan 🗑️
+                  </button>
+                )}
+              </div>
               <button
                 onClick={() => setIsOpen(false)}
-                className="text-xs font-bold text-teal-450 hover:text-teal-400 uppercase tracking-wider"
+                className="text-xs font-bold text-teal-400 hover:text-teal-350 uppercase tracking-wider"
               >
                 Tutup
               </button>

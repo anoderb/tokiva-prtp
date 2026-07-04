@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useProduk } from '@/hooks/use-produk';
 import { useCart } from '@/hooks/use-cart';
 import { useTransaksi } from '@/hooks/use-transaksi';
@@ -9,7 +9,7 @@ import CartWidget from '@/components/cart-widget';
 import CheckoutModal from '@/components/checkout-modal';
 import CameraCapture from '@/components/camera-capture';
 import { ToastItem, ToastInfo } from '@/components/ui';
-import { Camera, QrCode, RefreshCw, Loader2, Store } from 'lucide-react';
+import { Camera, RefreshCw, Loader2, Store, List } from 'lucide-react';
 
 /**
  * Primary Kasir POS page.
@@ -17,12 +17,19 @@ import { Camera, QrCode, RefreshCw, Loader2, Store } from 'lucide-react';
  */
 export default function KasirPage() {
   const { produkList, kategoriList, loading: loadingProduk, refresh, error, saveEmbedding } = useProduk();
-  const { cartItems, totalQty, total, subtotal, diskon, addToCart, updateQuantity, removeFromCart, clearCart } = useCart();
+  const { cartItems, totalQty, total, addToCart, updateQuantity, removeFromCart, clearCart } = useCart();
   const { checkout, loading: isProcessing } = useTransaksi();
 
-  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [isManualMode, setIsManualMode] = useState(false);
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [toasts, setToasts] = useState<ToastInfo[]>([]);
+
+  // Pre-warm TensorFlow Mobilenet model on mount in background
+  useEffect(() => {
+    import('@/lib/image-classifier').then(({ loadModel }) => {
+      loadModel().then(() => console.log('Model preloaded in background.'));
+    });
+  }, []);
 
   const addToast = (message: string, type: 'info' | 'success' | 'warning' | 'error' = 'success') => {
     const id = Math.random().toString();
@@ -38,7 +45,7 @@ export default function KasirPage() {
     addToast(`${produk.nama} ditambahkan ke keranjang`, 'success');
   };
 
-  const handleDetectedProduct = async (produk: any, capturedEmbedding?: number[]) => {
+  const handleDetectedProduct = async (produk: any, capturedEmbedding?: number[], snapshotBase64?: string) => {
     addToCart(produk, 1);
     addToast(`[Scan] ${produk.nama} terdeteksi!`, 'success');
 
@@ -57,7 +64,7 @@ export default function KasirPage() {
   };
 
   const handleCheckoutConfirm = async (bayar: number, kembalian: number) => {
-    const noTx = await checkout(cartItems, subtotal, diskon, total, bayar, kembalian);
+    const noTx = await checkout(cartItems, total, 0, total, bayar, kembalian);
     if (noTx) {
       addToast(`Transaksi ${noTx} berhasil!`, 'success');
       clearCart();
@@ -101,13 +108,23 @@ export default function KasirPage() {
             <RefreshCw className="w-4 h-4" />
           </button>
           
-          <button
-            onClick={() => setIsCameraOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 text-zinc-950 font-bold rounded-xl active:scale-95 transition-all"
-          >
-            <Camera className="w-4 h-4" />
-            <span className="text-xs uppercase tracking-wider hidden sm:inline">Pindai</span>
-          </button>
+          {isManualMode ? (
+            <button
+              onClick={() => setIsManualMode(false)}
+              className="flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 text-zinc-950 font-bold rounded-xl active:scale-95 transition-all"
+            >
+              <Camera className="w-4 h-4" />
+              <span className="text-xs uppercase tracking-wider">Scanner</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => setIsManualMode(true)}
+              className="flex items-center gap-1.5 px-3 py-2 bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-zinc-100 font-bold rounded-xl active:scale-95 transition-all"
+            >
+              <List className="w-4 h-4" />
+              <span className="text-xs uppercase tracking-wider">Manual</span>
+            </button>
+          )}
         </div>
       </header>
 
@@ -119,17 +136,37 @@ export default function KasirPage() {
           </div>
         )}
 
-        {loadingProduk && produkList.length === 0 ? (
-          <div className="flex-1 flex flex-col items-center justify-center py-24 gap-3">
-            <Loader2 className="w-8 h-8 text-teal-400 animate-spin" />
-            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Memuat database produk...</span>
-          </div>
+        {isManualMode ? (
+          loadingProduk && produkList.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center py-24 gap-3">
+              <Loader2 className="w-8 h-8 text-teal-400 animate-spin" />
+              <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Memuat database produk...</span>
+            </div>
+          ) : (
+            <ProductGrid
+              products={produkList}
+              categories={kategoriList}
+              onProductSelect={handleProductSelect}
+            />
+          )
         ) : (
-          <ProductGrid
-            products={produkList}
-            categories={kategoriList}
-            onProductSelect={handleProductSelect}
-          />
+          <div className="flex-1 flex flex-col justify-start">
+            {produkList.length > 0 ? (
+              <CameraCapture
+                isOpen={true}
+                onClose={() => {}}
+                produkList={produkList}
+                onDetected={handleDetectedProduct}
+                continuousMode={true}
+                embedded={true}
+              />
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center py-24 gap-3">
+                <Loader2 className="w-8 h-8 text-teal-400 animate-spin" />
+                <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Menunggu produk terisi...</span>
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -140,6 +177,7 @@ export default function KasirPage() {
         total={total}
         updateQuantity={updateQuantity}
         removeFromCart={removeFromCart}
+        onClearCart={clearCart}
         onCheckout={() => setIsCheckoutOpen(true)}
       />
 
@@ -150,15 +188,6 @@ export default function KasirPage() {
         total={total}
         onConfirm={handleCheckoutConfirm}
         isProcessing={isProcessing}
-      />
-
-      {/* Camera Live Product Scanner overlay */}
-      <CameraCapture
-        isOpen={isCameraOpen}
-        onClose={() => setIsCameraOpen(false)}
-        produkList={produkList}
-        onDetected={handleDetectedProduct}
-        continuousMode={true}
       />
     </div>
   );

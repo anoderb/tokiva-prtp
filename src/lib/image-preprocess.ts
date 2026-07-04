@@ -1,6 +1,6 @@
 /**
  * Image preprocessing utilities for MobileNetV2 inference pipeline.
- * Normalizes lighting and reduces background noise before embedding extraction.
+ * Normalizes lighting, corrects colors, and isolates the center object (Focal Masking).
  */
 
 /**
@@ -36,15 +36,51 @@ function autoContrastStretch(imageData: ImageData): void {
 }
 
 /**
- * Center-weighted vignette — darkens the outer 25% edges of the image
- * to reduce background noise influence on MobileNetV2 embeddings.
- * The center (product area) remains fully bright.
+ * Color Balancing using the Gray World Assumption.
+ * Adjusts color channels so the average color is neutral gray.
+ * This neutralizes ambient warm (yellow) or cool (blue) lighting biases.
+ */
+function applyColorBalance(imageData: ImageData): void {
+  const data = imageData.data;
+  let sumR = 0, sumG = 0, sumB = 0;
+  const numPixels = data.length / 4;
+
+  // Pass 1: Sum all channels
+  for (let i = 0; i < data.length; i += 4) {
+    sumR += data[i];
+    sumG += data[i + 1];
+    sumB += data[i + 2];
+  }
+
+  // Calculate channel averages
+  const avgR = sumR / numPixels || 1;
+  const avgG = sumG / numPixels || 1;
+  const avgB = sumB / numPixels || 1;
+
+  // Target average is the overall gray scale average of all channels combined
+  const avgGray = (avgR + avgG + avgB) / 3;
+
+  // Scaling factors
+  const scaleR = avgGray / avgR;
+  const scaleG = avgGray / avgG;
+  const scaleB = avgGray / avgB;
+
+  // Pass 2: Apply scaling factors
+  for (let i = 0; i < data.length; i += 4) {
+    data[i]     = Math.min(255, Math.max(0, data[i]     * scaleR));
+    data[i + 1] = Math.min(255, Math.max(0, data[i + 1] * scaleG));
+    data[i + 2] = Math.min(255, Math.max(0, data[i + 2] * scaleB));
+  }
+}
+
+/**
+ * Focal Masking (100% Vignette Background Eraser).
+ * Isolates the center area of the camera reticle and blackens out all background noise.
  */
 function applyCenterVignette(imageData: ImageData, width: number, height: number): void {
   const data = imageData.data;
   const cx = width / 2;
   const cy = height / 2;
-  const maxDist = Math.sqrt(cx * cx + cy * cy);
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -52,9 +88,15 @@ function applyCenterVignette(imageData: ImageData, width: number, height: number
       const dy = (y - cy) / cy;
       const dist = Math.sqrt(dx * dx + dy * dy);
 
-      // Only darken if distance > 0.6 (outer 40% of radius)
-      if (dist > 0.6) {
-        const fade = 1 - Math.min((dist - 0.6) / 0.8, 0.45); // Max 45% darkening
+      // Outer boundary (> 0.70 radius) goes to 100% black
+      if (dist > 0.70) {
+        const idx = (y * width + x) * 4;
+        data[idx]     = 0;
+        data[idx + 1] = 0;
+        data[idx + 2] = 0;
+      } else if (dist > 0.50) {
+        // Smooth fade between 0.50 and 0.70
+        const fade = 1 - ((dist - 0.50) / 0.20);
         const idx = (y * width + x) * 4;
         data[idx]     = data[idx]     * fade;
         data[idx + 1] = data[idx + 1] * fade;
@@ -66,10 +108,10 @@ function applyCenterVignette(imageData: ImageData, width: number, height: number
 
 /**
  * Main preprocessing function.
- * Takes a 224x224 canvas, applies contrast normalization and center vignette,
- * returns a new preprocessed canvas ready for MobileNetV2 inference.
+ * Takes a 224x224 canvas, applies contrast stretch, color balancing, and focal masking.
+ * Returns a new preprocessed canvas ready for MobileNetV2 inference.
  *
- * Performance: ~2-5ms on modern devices.
+ * Performance: ~3-6ms.
  */
 export function normalizeCanvas(sourceCanvas: HTMLCanvasElement): HTMLCanvasElement {
   const width = sourceCanvas.width;
@@ -87,7 +129,10 @@ export function normalizeCanvas(sourceCanvas: HTMLCanvasElement): HTMLCanvasElem
   // Step 1: Auto contrast stretch
   autoContrastStretch(imageData);
 
-  // Step 2: Center-weighted vignette
+  // Step 2: Color balance (Gray World)
+  applyColorBalance(imageData);
+
+  // Step 3: Focal Masking (Vignette)
   applyCenterVignette(imageData, width, height);
 
   ctx.putImageData(imageData, 0, 0);
