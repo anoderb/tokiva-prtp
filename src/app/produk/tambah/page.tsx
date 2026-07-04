@@ -6,8 +6,9 @@ import { useProduk } from '@/hooks/use-produk';
 import { supabase } from '@/lib/supabase';
 import { Button, Input, ToastItem, ToastInfo } from '@/components/ui';
 import CameraCapture from '@/components/camera-capture';
-import { ArrowLeft, Camera, Check, AlertCircle, Save, Sparkles, Loader2, X } from 'lucide-react';
+import { ArrowLeft, Camera, Check, AlertCircle, Save, Sparkles, Loader2, X, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
+import { cosineSimilarity } from '@/lib/image-classifier';
 
 // Component rendering logic (wrapped in Suspense below)
 function TambahProdukContent() {
@@ -34,9 +35,48 @@ function TambahProdukContent() {
 
   // General Page States
   const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [isBarcodeScanOpen, setIsBarcodeScanOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [toasts, setToasts] = useState<ToastInfo[]>([]);
   const [targetProduct, setTargetProduct] = useState<any | null>(null);
+
+  // Generate random SKU code
+  const generateRandomSKU = () => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let result = 'TKV-';
+    for (let i = 0; i < 6; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+  };
+
+  // Compare the new embedding against existing ones to check for outlier quality
+  const checkEmbeddingQuality = (newEmbeds: number[][], existingEmbeds: number[][]): boolean => {
+    if (existingEmbeds.length === 0 || newEmbeds.length === 0) return true;
+    
+    let totalSim = 0;
+    let comparisons = 0;
+    
+    for (const newEmb of newEmbeds) {
+      for (const oldEmb of existingEmbeds) {
+        totalSim += cosineSimilarity(newEmb, oldEmb);
+        comparisons++;
+      }
+    }
+    
+    const avgSim = totalSim / (comparisons || 1);
+    console.log('Embedding Quality check: average similarity =', avgSim);
+    
+    // Threshold is 0.35
+    return avgSim >= 0.35;
+  };
+
+  // Auto-generate SKU on mount
+  useEffect(() => {
+    if (!registerId) {
+      setKode(generateRandomSKU());
+    }
+  }, [registerId]);
 
   const addToast = (message: string, type: 'info' | 'success' | 'warning' | 'error' = 'success') => {
     const id = Math.random().toString();
@@ -87,9 +127,9 @@ function TambahProdukContent() {
   };
 
   // Camera capture callback
-  const handlePhotoCaptured = (photoBase64: string, embedding: number[]) => {
+  const handlePhotoCaptured = (photoBase64: string, embeddings: number[][]) => {
     setCapturedPhotos((prev) => [...prev, photoBase64]);
-    setCapturedEmbeddings((prev) => [...prev, embedding]);
+    setCapturedEmbeddings((prev) => [...prev, ...embeddings]);
     addToast(`Foto AI ke-${capturedPhotos.length + 1} berhasil direkam`, 'success');
   };
 
@@ -176,6 +216,18 @@ function TambahProdukContent() {
 
       let currentEmbeds: number[][] = curProd?.foto_embedding ? (curProd.foto_embedding as number[][]) : [];
       
+      // Quality Gate check: if average similarity is less than 0.35, show warning confirmation
+      const isQualityOk = checkEmbeddingQuality(capturedEmbeddings, currentEmbeds);
+      if (!isQualityOk) {
+        const confirmSave = window.confirm(
+          "Peringatan: Kualitas foto AI baru terdeteksi rendah/sangat berbeda dari foto-foto sebelumnya (kemungkinan salah objek atau pencahayaan ekstrim). Yakin ingin menyimpan?"
+        );
+        if (!confirmSave) {
+          setIsSaving(false);
+          return;
+        }
+      }
+
       // Append all new captured embeddings
       currentEmbeds.push(...capturedEmbeddings);
 
@@ -334,8 +386,53 @@ function TambahProdukContent() {
       </header>
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-4 mt-2">
-        <Input label="Kode SKU (Wajib)" placeholder="E.g. INDOMIE-SP-GRG" value={kode} onChange={(e) => setKode(e.target.value)} required />
-        <Input label="Barcode EAN (Opsional)" placeholder="Scan atau input barcode angka" value={barcode} onChange={(e) => setBarcode(e.target.value)} />
+        {/* Kode SKU field with auto-generate/regenerate button */}
+        <div className="flex flex-col gap-1.5 w-full">
+          <label className="text-xs font-semibold text-zinc-400 tracking-wider uppercase">Kode SKU (Wajib)</label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="E.g. TKV-A7B8C9"
+              value={kode}
+              onChange={(e) => setKode(e.target.value)}
+              required
+              className="flex-1 px-4 py-2.5 bg-zinc-900 border border-zinc-800 text-zinc-100 rounded-xl text-sm focus:outline-none focus:border-teal-500 min-h-[44px]"
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="icon"
+              onClick={() => setKode(generateRandomSKU())}
+              title="Regenerate SKU"
+            >
+              <RefreshCw className="w-4 h-4 text-zinc-400" />
+            </Button>
+          </div>
+        </div>
+
+        {/* Barcode EAN field with camera scan button */}
+        <div className="flex flex-col gap-1.5 w-full">
+          <label className="text-xs font-semibold text-zinc-400 tracking-wider uppercase">Barcode EAN (Opsional)</label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="Scan atau input barcode angka"
+              value={barcode}
+              onChange={(e) => setBarcode(e.target.value)}
+              className="flex-1 px-4 py-2.5 bg-zinc-900 border border-zinc-800 text-zinc-100 rounded-xl text-sm focus:outline-none focus:border-teal-500 min-h-[44px]"
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="icon"
+              onClick={() => setIsBarcodeScanOpen(true)}
+              title="Scan Barcode via Kamera"
+            >
+              <Camera className="w-4 h-4 text-zinc-400" />
+            </Button>
+          </div>
+        </div>
+
         <Input label="Nama Produk (Wajib)" placeholder="E.g. Indomie Goreng Spesial" value={nama} onChange={(e) => setNama(e.target.value)} required />
 
         <div className="grid grid-cols-2 gap-3">
@@ -438,6 +535,17 @@ function TambahProdukContent() {
         produkList={[]}
         onDetected={() => {}}
         onPhotoCaptured={handlePhotoCaptured}
+      />
+
+      <CameraCapture
+        isOpen={isBarcodeScanOpen}
+        onClose={() => setIsBarcodeScanOpen(false)}
+        produkList={[]}
+        onDetected={() => {}}
+        onBarcodeScanned={(scanned) => {
+          setBarcode(scanned);
+          addToast(`Barcode ${scanned} berhasil dipindai!`, 'success');
+        }}
       />
     </div>
   );

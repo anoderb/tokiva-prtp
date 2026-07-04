@@ -145,6 +145,7 @@ export default function KasirPage() {
         onClose={() => setIsCameraOpen(false)}
         produkList={produkList}
         onDetected={handleDetectedProduct}
+        continuousMode={true}
       />
     </div>
   );

@@ -1,10 +1,10 @@
 'use client';
 
-import React, { useRef, useState, useEffect } from 'react';
-import { getEmbedding, findNearest, loadModel } from '../lib/image-classifier';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { getEmbedding, generateAugmentedEmbeddings, findNearest, loadModel } from '../lib/image-classifier';
 import { Produk } from '../types';
 import { Button } from './ui';
-import { Camera, RefreshCw, X, Radio, Check, Loader2 } from 'lucide-react';
+import { Camera, RefreshCw, X, Radio, Check, Loader2, ShoppingCart } from 'lucide-react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
 
 interface CameraCaptureProps {
@@ -12,8 +12,12 @@ interface CameraCaptureProps {
   onClose: () => void;
   produkList: Produk[];
   onDetected: (produk: Produk) => void;
-  // If provided, operates in "photo capturing" mode returning a single embedding
-  onPhotoCaptured?: (photoBase64: string, embedding: number[]) => void;
+  /** If provided, operates in "photo capturing" mode returning augmented embeddings */
+  onPhotoCaptured?: (photoBase64: string, embeddings: number[][]) => void;
+  /** If provided, scanner returns raw scanned barcode code directly and closes */
+  onBarcodeScanned?: (barcode: string) => void;
+  /** If true, camera stays open after detection and continues scanning (for cashier mode) */
+  continuousMode?: boolean;
 }
 
 export default function CameraCapture({
@@ -22,6 +26,8 @@ export default function CameraCapture({
   produkList,
   onDetected,
   onPhotoCaptured,
+  onBarcodeScanned,
+  continuousMode = false,
 }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -34,6 +40,11 @@ export default function CameraCapture({
   const [candidates, setCandidates] = useState<Array<{ produk: Produk; similarity: number }>>([]);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
   
+  // Continuous mode states
+  const [scanCount, setScanCount] = useState(0);
+  const [inlineToast, setInlineToast] = useState<string | null>(null);
+  const inlineToastTimerRef = useRef<NodeJS.Timeout | null>(null);
+  
   const barcodeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
 
   // Initialize Barcode Reader once
@@ -44,9 +55,25 @@ export default function CameraCapture({
     };
   }, []);
 
+  // Reset scan count when camera opens/closes
+  useEffect(() => {
+    if (isOpen) {
+      setScanCount(0);
+      setInlineToast(null);
+    }
+  }, [isOpen]);
+
+  // Show inline toast overlay (auto-dismiss after 1.5s)
+  const showInlineToast = useCallback((message: string) => {
+    if (inlineToastTimerRef.current) clearTimeout(inlineToastTimerRef.current);
+    setInlineToast(message);
+    inlineToastTimerRef.current = setTimeout(() => {
+      setInlineToast(null);
+    }, 1500);
+  }, []);
+
   // Trigger web haptics and audio feedback
   const triggerSuccessFeedback = () => {
-    // 1. Audio feedback (Web Audio synth beep)
     try {
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const oscillator = audioCtx.createOscillator();
@@ -54,7 +81,7 @@ export default function CameraCapture({
       oscillator.connect(gainNode);
       gainNode.connect(audioCtx.destination);
       oscillator.type = 'sine';
-      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // High beep
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
       gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime);
       oscillator.start();
       oscillator.stop(audioCtx.currentTime + 0.12);
@@ -62,7 +89,6 @@ export default function CameraCapture({
       console.warn('Audio feedback blocked or unsupported', e);
     }
 
-    // 2. Vibration feedback
     if (typeof navigator !== 'undefined' && navigator.vibrate) {
       navigator.vibrate(100);
     }
@@ -87,7 +113,6 @@ export default function CameraCapture({
   // Start webcam stream
   const startCamera = async () => {
     setIsInitializing(true);
-    // Stop any active streams first
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
     }
@@ -129,12 +154,62 @@ export default function CameraCapture({
     };
   }, [isOpen, modelLoaded, facingMode]);
 
-  // Flip Camera Front <-> Back
   const toggleFacingMode = () => {
     setFacingMode((prev) => (prev === 'user' ? 'environment' : 'user'));
   };
 
-  // Main Image Processing & Inference Loop
+  /**
+   * Multi-Frame Averaging: captures 3 frames ~200ms apart and averages their embeddings.
+   * Reduces noise from hand movement, flicker, and blur.
+   */
+  const captureMultiFrameEmbedding = async (): Promise<number[] | null> => {
+    if (!videoRef.current || !modelLoaded) return null;
+
+    const frameEmbeddings: number[][] = [];
+    const FRAME_COUNT = 3;
+    const FRAME_DELAY = 200; // ms between frames
+
+    for (let f = 0; f < FRAME_COUNT; f++) {
+      const video = videoRef.current;
+      if (!video) return null;
+
+      const width = video.videoWidth || 640;
+      const height = video.videoHeight || 480;
+      const size = Math.min(width, height);
+      const sx = (width - size) / 2;
+      const sy = (height - size) / 2;
+
+      const aiCanvas = document.createElement('canvas');
+      aiCanvas.width = 224;
+      aiCanvas.height = 224;
+      const aiCtx = aiCanvas.getContext('2d');
+      if (!aiCtx) return null;
+      aiCtx.drawImage(video, sx, sy, size, size, 0, 0, 224, 224);
+
+      const emb = await getEmbedding(aiCanvas);
+      frameEmbeddings.push(emb);
+
+      if (f < FRAME_COUNT - 1) {
+        await new Promise((r) => setTimeout(r, FRAME_DELAY));
+      }
+    }
+
+    // Average all frame embeddings
+    const dim = frameEmbeddings[0].length;
+    const averaged = new Array(dim).fill(0);
+    for (const emb of frameEmbeddings) {
+      for (let i = 0; i < dim; i++) {
+        averaged[i] += emb[i];
+      }
+    }
+    for (let i = 0; i < dim; i++) {
+      averaged[i] /= FRAME_COUNT;
+    }
+
+    return averaged;
+  };
+
+  // Main Image Processing & Inference (with multi-frame averaging)
   const performInference = async (): Promise<{ embedding: number[]; base64: string; barcode: string | null } | null> => {
     if (!videoRef.current || !modelLoaded) return null;
 
@@ -165,30 +240,48 @@ export default function CameraCapture({
         }
       }
 
-      // 3. Capture square and downscale to 224x224 for MobileNetV2 AI
+      // 3. Multi-frame averaging for AI embedding
+      const embedding = await captureMultiFrameEmbedding();
+      if (!embedding) {
+        setIsScanning(false);
+        return null;
+      }
+
+      // 4. Generate base64 preview from current frame
       const size = Math.min(width, height);
       const sx = (width - size) / 2;
       const sy = (height - size) / 2;
+      const previewCanvas = document.createElement('canvas');
+      previewCanvas.width = 224;
+      previewCanvas.height = 224;
+      const previewCtx = previewCanvas.getContext('2d');
+      if (previewCtx) {
+        previewCtx.drawImage(canvas, sx, sy, size, size, 0, 0, 224, 224);
+      }
+      const base64 = previewCanvas.toDataURL('image/webp', 0.8);
 
-      const aiCanvas = document.createElement('canvas');
-      aiCanvas.width = 224;
-      aiCanvas.height = 224;
-      const aiCtx = aiCanvas.getContext('2d');
-      if (!aiCtx) return null;
-      aiCtx.drawImage(canvas, sx, sy, size, size, 0, 0, 224, 224);
-
-      // Generate base64 picture preview (for admin register mode)
-      const base64 = aiCanvas.toDataURL('image/webp', 0.8);
-
-      // Run MobileNet inference to generate embedding vector
-      const embedding = await getEmbedding(aiCanvas);
-      
       setIsScanning(false);
       return { embedding, base64, barcode: scannedBarcode };
     } catch (err) {
       console.error('Inference error:', err);
       setIsScanning(false);
       return null;
+    }
+  };
+
+  /** Handle successful product detection — supports continuous mode */
+  const handleProductMatch = (matchProduct: Produk, source: 'barcode' | 'ai') => {
+    triggerSuccessFeedback();
+    onDetected(matchProduct);
+
+    if (continuousMode) {
+      // Don't close camera — show inline toast and continue scanning
+      setScanCount((prev) => prev + 1);
+      showInlineToast(`✅ ${matchProduct.nama} +1`);
+      setCandidates([]);
+      setStatusMessage('Mencari produk otomatis (Barcode / AI)...');
+    } else {
+      onClose();
     }
   };
 
@@ -205,8 +298,26 @@ export default function CameraCapture({
     }
 
     if (onPhotoCaptured) {
-      // Photo register mode
-      onPhotoCaptured(result.base64, result.embedding);
+      // Photo register mode — generate augmented embeddings (1 foto → 6 embeddings)
+      setStatusMessage('Menghasilkan variasi AI (6 embedding)...');
+      const video = videoRef.current;
+      if (!video) return;
+
+      const width = video.videoWidth || 640;
+      const height = video.videoHeight || 480;
+      const size = Math.min(width, height);
+      const sx = (width - size) / 2;
+      const sy = (height - size) / 2;
+
+      const aiCanvas = document.createElement('canvas');
+      aiCanvas.width = 224;
+      aiCanvas.height = 224;
+      const aiCtx = aiCanvas.getContext('2d');
+      if (!aiCtx) return;
+      aiCtx.drawImage(video, sx, sy, size, size, 0, 0, 224, 224);
+
+      const augmentedEmbeddings = await generateAugmentedEmbeddings(aiCanvas);
+      onPhotoCaptured(result.base64, augmentedEmbeddings);
       triggerSuccessFeedback();
       onClose();
       return;
@@ -214,13 +325,17 @@ export default function CameraCapture({
 
     // Check barcode match first
     if (result.barcode) {
+      if (onBarcodeScanned) {
+        triggerSuccessFeedback();
+        onBarcodeScanned(result.barcode);
+        onClose();
+        return;
+      }
       const matchProduct = produkList.find(
         (p) => p.barcode === result.barcode || p.kode === result.barcode
       );
       if (matchProduct) {
-        triggerSuccessFeedback();
-        onDetected(matchProduct);
-        onClose();
+        handleProductMatch(matchProduct, 'barcode');
         return;
       }
     }
@@ -239,12 +354,8 @@ export default function CameraCapture({
 
       if (matchProduct) {
         if (topMatch.similarity >= 0.80) {
-          // Instant match
-          triggerSuccessFeedback();
-          onDetected(matchProduct);
-          onClose();
+          handleProductMatch(matchProduct, 'ai');
         } else {
-          // Show candidate items for ambiguous match
           const list = matches.slice(0, 3).map((m) => ({
             produk: produkList.find((p) => p.id === m.id)!,
             similarity: m.similarity,
@@ -272,13 +383,17 @@ export default function CameraCapture({
 
       // 1. Process Barcode Match
       if (result.barcode) {
+        if (onBarcodeScanned) {
+          triggerSuccessFeedback();
+          onBarcodeScanned(result.barcode);
+          onClose();
+          return;
+        }
         const matchProduct = produkList.find(
           (p) => p.barcode === result.barcode || p.kode === result.barcode
         );
         if (matchProduct) {
-          triggerSuccessFeedback();
-          onDetected(matchProduct);
-          onClose();
+          handleProductMatch(matchProduct, 'barcode');
           return;
         }
       }
@@ -297,12 +412,8 @@ export default function CameraCapture({
 
         if (matchProduct) {
           if (topMatch.similarity >= 0.82) {
-            // Highly confident match
-            triggerSuccessFeedback();
-            onDetected(matchProduct);
-            onClose();
+            handleProductMatch(matchProduct, 'ai');
           } else {
-            // Unsure match, show options and stop auto-scan
             const list = matches.slice(0, 3).map((m) => ({
               produk: produkList.find((p) => p.id === m.id)!,
               similarity: m.similarity,
@@ -316,7 +427,7 @@ export default function CameraCapture({
 
     timerId = setInterval(() => {
       autoScan();
-    }, 1500); // scan frame every 1.5 seconds for speed
+    }, 1500);
 
     return () => {
       clearInterval(timerId);
@@ -335,12 +446,21 @@ export default function CameraCapture({
             {onPhotoCaptured ? 'Daftarkan Foto Produk' : 'Kamera Deteksi Produk'}
           </h2>
         </div>
-        <button
-          onClick={onClose}
-          className="p-2 bg-zinc-900 rounded-full hover:bg-zinc-800 transition-colors"
-        >
-          <X className="w-5 h-5 text-zinc-400 hover:text-zinc-200" />
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Continuous mode scan counter badge */}
+          {continuousMode && scanCount > 0 && (
+            <div className="flex items-center gap-1 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider">
+              <ShoppingCart className="w-3 h-3" />
+              {scanCount} item
+            </div>
+          )}
+          <button
+            onClick={onClose}
+            className="p-2 bg-zinc-900 rounded-full hover:bg-zinc-800 transition-colors"
+          >
+            <X className="w-5 h-5 text-zinc-400 hover:text-zinc-200" />
+          </button>
+        </div>
       </div>
 
       {/* Main Camera Frame */}
@@ -377,6 +497,13 @@ export default function CameraCapture({
             {statusMessage}
           </div>
         )}
+
+        {/* Inline toast overlay for continuous mode */}
+        {inlineToast && (
+          <div className="absolute bottom-6 left-6 right-6 bg-emerald-500/90 backdrop-blur-md text-white px-4 py-3 rounded-2xl text-center z-30 shadow-2xl animate-in slide-in-from-bottom duration-200">
+            <span className="text-sm font-bold tracking-wide">{inlineToast}</span>
+          </div>
+        )}
       </div>
 
       {/* Candidates Selection Sheet */}
@@ -390,9 +517,7 @@ export default function CameraCapture({
               <button
                 key={c.produk.id}
                 onClick={() => {
-                  triggerSuccessFeedback();
-                  onDetected(c.produk);
-                  onClose();
+                  handleProductMatch(c.produk, 'ai');
                 }}
                 className="w-full flex items-center justify-between p-3 bg-zinc-900 border border-zinc-800/80 hover:bg-zinc-850 rounded-xl transition-all"
               >
@@ -415,7 +540,7 @@ export default function CameraCapture({
               className="mt-1"
               onClick={() => {
                 setCandidates([]);
-                setStatusMessage(isAutoMode ? 'Mencari produk otomatis...' : 'Arahkan kamera ke produk');
+                setStatusMessage(isAutoMode ? 'Mencari produk otomatis (Barcode / AI)...' : 'Arahkan kamera ke produk');
               }}
             >
               Reset / Pindai Ulang
@@ -433,7 +558,7 @@ export default function CameraCapture({
               onClick={() => {
                 setIsAutoMode(true);
                 setCandidates([]);
-                setStatusMessage('Mencari produk otomatis...');
+                setStatusMessage('Mencari produk otomatis (Barcode / AI)...');
               }}
               className={`flex-1 py-1.5 text-xs font-bold uppercase tracking-wider rounded-lg transition-all ${
                 isAutoMode ? 'bg-teal-500/10 text-teal-400 font-bold' : 'text-zinc-500'
