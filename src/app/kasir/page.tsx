@@ -16,7 +16,7 @@ import { Camera, QrCode, RefreshCw, Loader2, Store } from 'lucide-react';
  * Manages states for cart, active scanner, payment modals, and real-time transaction processing.
  */
 export default function KasirPage() {
-  const { produkList, kategoriList, loading: loadingProduk, refresh, error } = useProduk();
+  const { produkList, kategoriList, loading: loadingProduk, refresh, error, saveEmbedding } = useProduk();
   const { cartItems, totalQty, total, subtotal, diskon, addToCart, updateQuantity, removeFromCart, clearCart } = useCart();
   const { checkout, loading: isProcessing } = useTransaksi();
 
@@ -38,9 +38,22 @@ export default function KasirPage() {
     addToast(`${produk.nama} ditambahkan ke keranjang`, 'success');
   };
 
-  const handleDetectedProduct = (produk: any) => {
+  const handleDetectedProduct = async (produk: any, capturedEmbedding?: number[]) => {
     addToCart(produk, 1);
     addToast(`[Scan] ${produk.nama} terdeteksi!`, 'success');
+
+    // Self-learning loop: if user manually selected a candidate, capturedEmbedding is passed
+    if (capturedEmbedding) {
+      console.log(`Self-learning trigger: training AI model for product "${produk.nama}"...`);
+      try {
+        const success = await saveEmbedding(produk.id, capturedEmbedding);
+        if (success) {
+          addToast(`AI berhasil mempelajari visual baru untuk "${produk.nama}"!`, 'info');
+        }
+      } catch (err) {
+        console.warn('Failed to save self-learning embedding:', err);
+      }
+    }
   };
 
   const handleCheckoutConfirm = async (bayar: number, kembalian: number) => {

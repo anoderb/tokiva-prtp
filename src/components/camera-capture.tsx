@@ -6,12 +6,13 @@ import { Produk } from '../types';
 import { Button } from './ui';
 import { Camera, RefreshCw, X, Radio, Check, Loader2, ShoppingCart } from 'lucide-react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
+import { BarcodeFormat, DecodeHintType } from '@zxing/library';
 
 interface CameraCaptureProps {
   isOpen: boolean;
   onClose: () => void;
   produkList: Produk[];
-  onDetected: (produk: Produk) => void;
+  onDetected: (produk: Produk, capturedEmbedding?: number[]) => void;
   /** If provided, operates in "photo capturing" mode returning augmented embeddings */
   onPhotoCaptured?: (photoBase64: string, embeddings: number[][]) => void;
   /** If provided, scanner returns raw scanned barcode code directly and closes */
@@ -31,6 +32,7 @@ export default function CameraCapture({
 }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const lastQueryEmbeddingRef = useRef<number[] | null>(null);
   
   const [modelLoaded, setModelLoaded] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
@@ -47,9 +49,34 @@ export default function CameraCapture({
   
   const barcodeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
 
-  // Initialize Barcode Reader once
+  // Initialize Barcode Reader once with TRY_HARDER and all formats
   useEffect(() => {
-    barcodeReaderRef.current = new BrowserMultiFormatReader();
+    const hints = new Map();
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    
+    // Explicitly define possible formats to support all standard codes
+    const formats = [
+      BarcodeFormat.AZTEC,
+      BarcodeFormat.CODABAR,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.CODE_93,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.DATA_MATRIX,
+      BarcodeFormat.EAN_8,
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.ITF,
+      BarcodeFormat.MAXICODE,
+      BarcodeFormat.PDF_417,
+      BarcodeFormat.QR_CODE,
+      BarcodeFormat.RSS_14,
+      BarcodeFormat.RSS_EXPANDED,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.UPC_E,
+      BarcodeFormat.UPC_EAN_EXTENSION
+    ];
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
+
+    barcodeReaderRef.current = new BrowserMultiFormatReader(hints);
     return () => {
       barcodeReaderRef.current = null;
     };
@@ -62,6 +89,59 @@ export default function CameraCapture({
       setInlineToast(null);
     }
   }, [isOpen]);
+
+  // Start continuous barcode scanning from the active video stream
+  useEffect(() => {
+    if (!isOpen || isInitializing || !videoRef.current || onPhotoCaptured || !barcodeReaderRef.current) return;
+
+    let active = true;
+    const reader = barcodeReaderRef.current;
+    const video = videoRef.current;
+    let scannerControls: any = null;
+
+    console.log('Starting parallel continuous video barcode scanning...');
+    
+    reader.decodeFromVideoElement(video, (result, error) => {
+      if (!active) return;
+
+      if (result) {
+        const scannedCode = result.getText();
+        console.log('Video stream barcode detected:', scannedCode);
+
+        // 1. If in raw barcode scanner mode (e.g. form input fill)
+        if (onBarcodeScanned) {
+          triggerSuccessFeedback();
+          onBarcodeScanned(scannedCode);
+          onClose();
+          active = false;
+          return;
+        }
+
+        // 2. If in kasir mode, lookup matching product in produkList
+        const matchProduct = produkList.find(
+          (p) => p.barcode === scannedCode || p.kode === scannedCode
+        );
+        if (matchProduct) {
+          handleProductMatch(matchProduct, 'barcode');
+        }
+      }
+    }).then((controls) => {
+      scannerControls = controls;
+    }).catch((err) => {
+      console.warn('Continuous barcode scanning startup failed:', err);
+    });
+
+    return () => {
+      active = false;
+      if (scannerControls) {
+        try {
+          scannerControls.stop();
+        } catch (e) {
+          console.warn('Error stopping scanner controls:', e);
+        }
+      }
+    };
+  }, [isOpen, isInitializing, modelLoaded, produkList, onBarcodeScanned, onPhotoCaptured]);
 
   // Show inline toast overlay (auto-dismiss after 1.5s)
   const showInlineToast = useCallback((message: string) => {
@@ -220,7 +300,7 @@ export default function CameraCapture({
       const width = video.videoWidth || 640;
       const height = video.videoHeight || 480;
 
-      // 1. Capture full resolution frame for Barcode Scan
+      // 1. Capture full resolution frame for AI cropping
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
@@ -228,26 +308,17 @@ export default function CameraCapture({
       if (!ctx) return null;
       ctx.drawImage(video, 0, 0, width, height);
 
-      // 2. Try to decode barcode first
-      let scannedBarcode: string | null = null;
-      if (barcodeReaderRef.current && !onPhotoCaptured) {
-        try {
-          const barcodeResult = await barcodeReaderRef.current.decodeFromCanvas(canvas);
-          scannedBarcode = barcodeResult.getText();
-          console.log('Barcode auto-detected:', scannedBarcode);
-        } catch (e) {
-          // Barcode not found in this frame, proceed to AI
-        }
-      }
-
-      // 3. Multi-frame averaging for AI embedding
+      // 2. Multi-frame averaging for AI embedding
       const embedding = await captureMultiFrameEmbedding();
       if (!embedding) {
         setIsScanning(false);
         return null;
       }
 
-      // 4. Generate base64 preview from current frame
+      // Store in ref for self-learning
+      lastQueryEmbeddingRef.current = embedding;
+
+      // 3. Generate base64 preview from current frame
       const size = Math.min(width, height);
       const sx = (width - size) / 2;
       const sy = (height - size) / 2;
@@ -261,7 +332,7 @@ export default function CameraCapture({
       const base64 = previewCanvas.toDataURL('image/webp', 0.8);
 
       setIsScanning(false);
-      return { embedding, base64, barcode: scannedBarcode };
+      return { embedding, base64, barcode: null };
     } catch (err) {
       console.error('Inference error:', err);
       setIsScanning(false);
@@ -269,10 +340,10 @@ export default function CameraCapture({
     }
   };
 
-  /** Handle successful product detection — supports continuous mode */
-  const handleProductMatch = (matchProduct: Produk, source: 'barcode' | 'ai') => {
+  /** Handle successful product detection — supports continuous mode and self-learning */
+  const handleProductMatch = (matchProduct: Produk, source: 'barcode' | 'ai', capturedEmbedding?: number[]) => {
     triggerSuccessFeedback();
-    onDetected(matchProduct);
+    onDetected(matchProduct, capturedEmbedding);
 
     if (continuousMode) {
       // Don't close camera — show inline toast and continue scanning
@@ -517,7 +588,7 @@ export default function CameraCapture({
               <button
                 key={c.produk.id}
                 onClick={() => {
-                  handleProductMatch(c.produk, 'ai');
+                  handleProductMatch(c.produk, 'ai', lastQueryEmbeddingRef.current || undefined);
                 }}
                 className="w-full flex items-center justify-between p-3 bg-zinc-900 border border-zinc-800/80 hover:bg-zinc-850 rounded-xl transition-all"
               >
